@@ -1,0 +1,67 @@
+curl -XDELETE "http://localhost:9200/store_rss"
+
+curl -XPUT "http://localhost:9200/store_rss" -d'
+{
+    "settings": {
+        "analysis": {
+            "analyzer": {
+                "facet" : {
+                    "type" : "custom",
+                    "tokenizer" : "keyword",
+                    "filter" : [ "lowercase" ]
+                }
+            }
+        }
+    }
+}'
+
+curl -XPUT "http://localhost:9200/store_rss/item/_mapping" -d'
+{
+    "item": {
+        "_timestamp": {"enabled": "true", "store": "yes"},
+        "properties" : {
+            "feedname"     : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "title"        : {"type": "string"   , "index": "analyzed"    , "include_in_all": true},
+            "link"         : {"type": "string"   , "index": "no"          , "include_in_all": false},
+            "updated"      : {"type": "date"     , "index": "analyzed"    , "include_in_all": false,
+                              "format": "dateOptionalTime", "store": "yes"},
+            "author"       : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "description"  : {"type": "string"   , "index": "analyzed"    , "include_in_all": true},
+            "comments"     : {"type": "string"   , "index": "no"          , "include_in_all": false},
+            "categories"   : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "location"     : {"type": "geo_point", "index": "analyzed"    , "include_in_all": false},
+            "enclosures" :
+            {
+                "properties" : {
+                    "url"    : {"type": "string", "index": "no"          , "include_in_all": false},
+                    "type"   : {"type": "string", "index": "not_analyzed", "include_in_all": false},
+                    "length" : {"type": "long"  , "index": "no"          , "include_in_all": false}
+                }
+            },
+
+            "page"         : {"type": "string"  , "index": "analyzed"     , "include_in_all": true}
+        }
+    }
+}'
+
+curl -XPUT "http://localhost:9200/store_rss/channel/_mapping" -d'
+{
+    "channel": {
+        "_timestamp": {"enabled": "true", "store": "yes"},
+        "properties" : {
+            "feedname"     : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "title"        : {"type": "string"   , "index": "analyzed"    , "include_in_all": true},
+            "url"          : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "version"      : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "updated"      : {"type": "date"     , "index": "analyzed"    , "include_in_all": false,
+                              "format": "dateOptionalTime", "store": "yes"},
+            "generator"    : {"type": "string"   , "index": "analyzed"    , "include_in_all": false},
+            "language"     : {"type": "string"   , "index": "not_analyzed", "include_in_all": false},
+            "description"  : {"type": "string"   , "index": "analyzed"    , "include_in_all": true},
+
+            "lastFetch"    : {"type": "date"     , "index": "analyzed"    , "include_in_all": "false",
+                              "format": "dateOptionalTime", "store": "yes"}
+            }
+        }
+    }
+}'

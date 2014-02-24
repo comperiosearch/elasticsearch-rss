@@ -1,0 +1,711 @@
+#!/usr/bin/python
+# -*- coding: iso-8859-1 -*-
+
+
+# [ ] TODO: Create object mapping for store index
+
+
+STORE        = "store_rss"
+
+
+import sys, os, getopt, re
+import datetime, time
+import elasticsearch, json
+import feedparser
+import requests, uuid
+
+
+ITEM         = "item"
+CHANNEL      = "channel"
+MAX_CHANNELS = 10000
+
+
+DEBUG = False
+
+
+#region Helpers
+
+
+agoRegex = re.compile("^(?P<number>\d)+\s*(?P<unit>\w)( ago)?$")
+
+
+def getUUID(fromStr):
+    return str(uuid.uuid3(uuid.NAMESPACE_URL, fromStr.encode("ascii", "ignore")))
+
+
+def fromISODateString(isoStr):
+    if isoStr == None:
+        return None
+    if "." in isoStr:
+        return datetime.datetime.strptime(isoStr, "%Y-%m-%dT%H:%M:%S.%fZ")
+    else:
+        return datetime.datetime.strptime(isoStr, "%Y-%m-%dT%H:%M:%SZ")
+
+def toISODateString(dateObj):
+    return dateObj.strftime("%Y-%m-%dT%H:%M:%SZ") # Screw the %.f ...
+
+def fromAgoString(agoStr):
+    # not these: minutes, minute, seconds, second, hours, hour, etc...
+    # only these "^(?P<number>\d)+\s*(?P<unit>\w)( ago)?$" where unit in
+    # s=second, m=minute, h=hour, d=day, w=week, M=month, y=year
+    m = agoRegex.match(agoStr)
+    if not m:
+        raise SyntaxError("illegal 'ago' string: %s" % agoStr)
+    number = int(m.group("number"))
+    unit = m.group("unit")
+    delta = None
+    if   unit == "s": delta = datetime.timedelta(seconds= number)
+    elif unit == "m": delta = datetime.timedelta(minutes= number)
+    elif unit == "h": delta = datetime.timedelta(hours= number)
+    elif unit == "d": delta = datetime.timedelta(days= number)
+    elif unit == "w": delta = datetime.timedelta(weeks= number)
+    elif unit == "M": delta = datetime.timedelta(days= number*30)
+    elif unit == "y": delta = datetime.timedelta(days= number*365)
+    else:
+        raise SyntaxError("illegal unit for 'ago' string in: %s" % agoStr)
+    return datetime.datetime.utcnow() - delta;
+
+
+def addIf(target, fromDict, fromName, toName=None):
+
+    if toName == None: toName = fromName
+
+    if fromName.startswith("*"):
+        searchkey = fromName[1:]
+        for key in fromDict:
+            if key.endswith(searchkey):
+                target.update({toName: fromDict[key]})
+                break
+    elif fromName in fromDict:
+        target.update({toName: fromDict[fromName]})
+
+
+def getChannelUpdatedIsoString(name, channel):
+    t = time.gmtime()
+    if "updated_parsed" in channel and type(channel["updated_parsed"]) is time.struct_time:
+        t = channel["updated_parsed"]
+    elif DEBUG:
+        print "Warning: '%s' missing update time in channel meta data. Using processing time instead." % name
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", t)
+
+def getItemUpdatedIsoString(feedname, item):
+    t = time.gmtime()
+    if "updated_parsed" in item and type(item["updated_parsed"]) is time.struct_time:
+        t = item["updated_parsed"]
+    elif "published_parsed" in item and type(item["published_parsed"]) is time.struct_time:
+        t = item["published_parsed"]
+    elif DEBUG:
+        print "Warning: An item in '%s' is missing both update and publish time in item data. Using processing time." % feedname
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", t)
+
+def getRSSChannelInfo(feedname, url):
+    rss = getRSS(feedname, url, skipItems=True)
+    if rss: return rss[0]
+    return None
+
+
+def getRSS(feedname, url, skipItems=False):
+
+    try:
+        feed = feedparser.parse(url)
+    except:
+        print "Error: Failed to read feed from: %s" % url
+        return None
+
+    channel = feed["channel"]
+    items = feed["items"]
+
+    if not url == feed["url"]:
+        print "Warning: Given URL and URL in channel meta differs:"
+        print "    given  : %s" % url
+        print "    channel: %s" % feed["url"]
+
+    # Create channel info part
+    cinfo = {"feedname": feedname, "url": url, "updated": getChannelUpdatedIsoString(feedname, channel)}
+    addIf(cinfo, feed   , "version")
+    addIf(cinfo, feed   , "url")
+    addIf(cinfo, channel, "title")
+    addIf(cinfo, channel, "link")
+    addIf(cinfo, channel, "subtitle", "description")
+    addIf(cinfo, channel, "language")
+    addIf(cinfo, channel, "generator")
+    #addIf(cinfo, channel, "*_updateperiod", "update_period")
+    #addIf(cinfo, channel, "*_updatefrequency", "update_frequency")
+    #addIf(cinfo, channel, "ttl")
+
+    #print "Debug: PROCESSED JSON FOR FEED [%s] %s" % (cinfo["version"], cinfo["title"])
+    #print json.dumps(cinfo, indent=2)
+
+
+    if skipItems:
+        return (cinfo, None)
+    
+    # Create items info part
+    iinfos = []
+    for i in items:
+
+        # Prefer "id", alternative "link" as "id", or skip (missing ID is too serious)
+        # Our IDs must be globally unique, so we add "<feedname>#" prefix to the ID.
+        rid = feedname + "#"
+        if "id" in i:
+            rid += i["id"]
+        elif "link" in i:
+            rid += i["link"]
+            if DEBUG:
+                print "Debug: Found item without 'id', using 'link' instead."
+        else:
+            if DEBUG:
+                print "Warning: Dropping item with neither 'id' nor 'link'."
+            continue
+
+        # Prefer "updated", alternative "published", alternative current processing time
+        updatedStr = getItemUpdatedIsoString(feedname, i)
+        
+        # Extract categories from "tags/term"
+        categories = []
+        if "tags" in i:
+            for t in i["tags"]:
+                categories.append(t["term"])
+
+        iinfo = {"feedname": feedname, "id": getUUID(rid), "updated": updatedStr, "categories": categories}
+        addIf(iinfo, i, "link")
+        addIf(iinfo, i, "title")
+        addIf(iinfo, i, "author")
+        addIf(iinfo, i, "comments")
+
+        #addIf(iinfo, i, "summary") #, "description"
+        #addIf(iinfo, i, "content")
+        # "content" comes with sub elements ("base", "type", "value"). Simplifying for now by extracting only value.
+        # This actually again comes from the non-list field "description" in RSS, AFAIK. So calling it "description" here..
+        # But there is not always "content", so use "summary" if it does not exist
+        if "content" in i and i["content"]:
+            iinfo.update({"description": i["content"][0]["value"]})
+        else:
+            addIf(iinfo, i, "summary", "description")
+
+        # Note: Skip "location" for now (in ES mapping)
+        # Note: Skip "enclosures" (with "url", "type", "length") for now (in ES mapping)
+
+        iinfos.append(iinfo)
+
+    return (cinfo, iinfos)
+
+
+def createQueryFilter(filter):
+    return {"query":{"filtered":{"filter":filter}}}
+
+
+def getChannel(es, feedname):
+    try:
+        res = es.get(index=STORE, doc_type=CHANNEL, id=feedname);
+
+        channel = res["_source"]
+        return channel
+
+    except elasticsearch.exceptions.NotFoundError:
+        #print "Warning: No channel info stored for feed '%s'." % feedname
+        return None
+
+
+def getChannels(es, *feednames):
+
+    # Get channels from ES
+    body = None
+    if feednames:
+        body = createQueryFilter({"terms": {"feedname": feednames}})
+    else:
+        body = {"query": {"match_all": {}}}
+    body.update({"size": MAX_CHANNELS})
+    res = es.search(index=STORE, doc_type=CHANNEL, body=body);
+
+    channels = {}
+    for hit in res["hits"]["hits"]:
+        name = hit["_id"]
+        channel = hit["_source"]
+        channels.update({name: channel})
+    return channels
+
+
+def putChannel(es, channel):
+    # TODO: try/except
+    res = es.index(index=STORE, doc_type=CHANNEL, id=channel["feedname"], body=channel);
+    return
+
+
+def deleteChannel(es, feedname):
+    try:
+        res = es.delete(index=STORE, doc_type=CHANNEL, id=feedname)
+    except:
+        print "Warning: Failed to delete channel info for feed '%s' in ES." % feedname
+
+
+
+def putItem(es, feedname, item, verbose):
+    
+    id = item["id"]
+    link = item["link"]
+    body = item.copy() # shallow, intentional
+    del body["id"]
+    
+    if link:
+        # TODO: try/except; for now, let it fail here
+        res = requests.get(link, verify=False)
+        page = res.text
+
+        body.update({"page": page})
+        #print "Debug: In feed '%s', read item in linked-to page; size = %d bytes." % (feedname, len(page))
+
+    # TODO: try/except; for now, let it fail here
+    #print json.dumps(body, indent=2) # DEBUG
+    res = es.index(index=STORE, doc_type=ITEM, id=id, body=body)
+
+    new = 0; replaced = 0
+    if res["created"]:
+        if verbose:
+            print "New item in %s: %s" % (feedname, item["title"])
+        new = 1
+    else:
+        replaced = 1
+    return (new, replaced)
+
+
+#region Commands
+
+
+def listFeeds(es, verbose, since, *feednames):
+
+    channels = getChannels(es, *feednames)
+
+    partial = False
+    total = 0
+
+    if not verbose:
+        print "%5s  %s" % ("ITEMS", "NAME")
+
+    for name,channel in channels.items():
+
+        # Get item count from ES
+
+        namePart = {"term": {"feedname": name}}
+        sincePart = None
+        if since:
+            isoSince = toISODateString(since)
+            sincePart = {"range": {"updated": { "from" : isoSince }}}
+
+        query = None
+        if sincePart:
+            query = createQueryFilter({"and" : [namePart, sincePart]})
+        else:
+            query = createQueryFilter(namePart)
+
+        res = es.count(index=STORE, doc_type=ITEM, body=query)
+        count = res["count"]
+        total += count
+        if res["_shards"]["successful"] < res["_shards"]["total"]: partial = True
+
+        # Show it
+
+        if verbose:
+            print "%s (%d)" % (name, count)
+            if channel:
+                fields = [ "version", "url", "title", "link",  "updated", "description", \
+                           "language", "generator", "lastFetch" ]
+                for f in fields:
+                    if f in channel:
+                        print "  %-11s : %s" % (f, channel[f])
+                    else:
+                        print "  %-11s :" % f
+            else:
+                print "  ** Error: Channel not registered."
+            print
+        else:
+            print "%5d  %s" % (count, name)
+
+    print "SUM ITEMS: %d" % total
+
+    if partial:
+        print "\n** RESULT WAS ONLY PARTIAL (ElasticSearch problem?)"
+
+
+def addFeed(es, name, url):
+
+    channel = getRSSChannelInfo(name, url)
+    if not channel:
+        print "Error: Failed to read channel from: %s" % url
+        return
+
+    existingChannel = getChannel(es, name)
+    if existingChannel:
+        print "Channel '%s' already exists. Replacing." % name
+
+    putChannel(es, channel)
+
+    print "Channel '%s' registered." % name
+
+    # TODO: Force a feed update(?)
+
+
+def addBulk(es):
+
+    totalCount = 0
+    replaceCount = 0
+
+    existingChannels = getChannels(es)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if line == "" or line.startswith("#"): continue
+        (name, url) = filter(None, line.split(" "))
+
+        totalCount += 1
+        found = False
+        if name in existingChannels:
+            replaceCount += 1
+            found = True
+
+        channel = getRSSChannelInfo(name, url)
+        if not channel:
+            print "Error: Failed to read channel from: %s" % url
+            continue
+
+        if not found:
+            print "Adding  : %s" % name
+        else:
+            print "Updating: %s" % name
+
+        putChannel(es, channel)
+
+        # TODO: Force a feed update(?)
+
+    print "%d feeds registered. (%d new)" % (totalCount, totalCount - replaceCount)
+
+
+def updateChannelInfo(es, verbose, *feednames):
+
+    existingChannels = getChannels(es, *feednames)
+
+    # Check and report if given feednames are not registered
+    if feednames:
+        for name in feednames:
+            if not name in existingChannels:
+                print "Warning: Channel '%s' not registered." % name
+
+    # Fetch RSS channel info from each RSS feed and send new data to ES
+    for name,existingChannel in existingChannels.items():
+        url  = existingChannel["url"]
+        channel = getRSSChannelInfo(name, url)
+        channel.update({"lastFetch": existingChannel["lastFetch"]}) # Keep lastFetch
+        putChannel(es, channel)
+        print "Channel info updated for feed '%s'." % name
+
+        if verbose:
+            fields = [ "version", "url", "title", "link",  "updated", "description", \
+                       "language", "generator", "lastFetch" ]
+            for f in fields:
+                if f in channel: print "  %-11s : %s" % (f, channel[f])
+
+
+def listItems(es, verbose, debug, since, limit, *feednames):
+    
+    partial = False
+    body = {}
+    
+    desc = {"order": "desc"}
+    body.update({"size": limit, "sort": [{"updated": desc}, {"_timestamp": desc}]})
+
+    andParts = []
+
+    if feednames:
+        andParts.append({"terms": {"feedname": feednames}})
+
+    if since:
+        isoSince = toISODateString(since)
+        andParts.append({"range": {"updated": { "from": isoSince }}})
+
+    if andParts:
+        qf = createQueryFilter({"and": andParts})
+        body.update(createQueryFilter({"and": andParts}))
+    else:
+        body.update({"query": {"match_all": {}}})
+
+    if debug:
+        print json.dumps(body,indent=2)
+
+    res = es.search(index=STORE, doc_type=ITEM, body=body)
+
+    if res["_shards"]["successful"] < res["_shards"]["total"]: partial = True
+    total = res["hits"]["total"]
+
+    print "%d HITS:" % total
+
+    for item in res["hits"]["hits"]:
+        id             = item["_id"]
+        source         = item["_source"]
+        feedname       = source["feedname"]
+        title          = source.get("title", "")
+        description    = source.get("description", "")
+        page           = source.get("page", "")
+        comments       = source.get("comments", "")
+        author         = source.get("author", "")
+        link           = source.get("link", "")
+        updatedDateIso = source.get("updated", "")
+        updatedDate = None
+        if updatedDateIso: updatedDate = fromISODateString(updatedDateIso)
+        categories = []
+        if "categories" in source: categories = source["categories"]
+        # Info gathered, now show it:
+        if verbose:
+            #print json.dumps(source, indent=2)
+            dateStr = ""
+            if updatedDate: dateStr = updatedDate.strftime("%Y-%m-%d %H:%M:%S z")
+            print "-"*78
+            print "ID          = %s" % id
+            print "FEED        = %s" % feedname
+            print "TITLE       = %s" % title
+            print "UPDATED     = %s" % dateStr
+            print "AUTHOR      = %s" % author
+            print "LINK        = %s" % link
+            print "COMMENTS    = %s" % id
+            print "CATEGORIES  = %s" % " | ".join(categories)
+            print "DESCRIPTION = (%d bytes)" % len(description)
+            print "PAGE        = (%d bytes)" % len(page)
+        else:
+            dateStr = ""
+            if updatedDate: dateStr = updatedDate.strftime("%m-%d %H:%M")
+            print "[%-10s] %s  %s" % (feedname, dateStr, title.replace("\n", "\\n"))
+
+    if partial:
+        print "\n** RESULT WAS ONLY PARTIAL (ElasticSearch problem?)"
+
+
+def fetchItems(es, verbose, dontfeed, force, *feednames):
+    
+    existingChannels = getChannels(es, *feednames)
+
+    # Check and report if given feednames are not registered
+    if feednames:
+        for name in feednames:
+            if not name in existingChannels:
+                print "Warning: Channel '%s' not registered." % name
+
+    # Fetch RSS feeds and write items and new channel info with new lastFetch time (== now)
+    for name,existingChannel in existingChannels.items():
+        url  = existingChannel["url"]
+        lastFetchDate = None
+        if "lastFetch" in existingChannel and existingChannel["lastFetch"]:
+            lastFetchDate = fromISODateString(existingChannel["lastFetch"])
+
+        # Get RSS feed
+        rss = getRSS(name, url)
+        if not rss:
+            print "Warning: Failed to read RSS feed '%s'. (skipping)" % name
+            continue
+        channel, items = rss
+
+        # Check if it is time to process the feed (or 'force' is specified)
+        updated = fromISODateString(channel["updated"])
+        #========
+        #print "LAST_FETCH    ", lastFetchDate
+        #print "CHANNEL UPDATE", updated
+        #========
+        qualified = False
+        if not updated or not lastFetchDate or updated > lastFetchDate:
+            qualified = True
+
+        if not qualified:
+            if force:
+                if verbose:
+                    print "Debug: Nothing new to fetch in '%s', but proceeding since 'force' was specified." % name
+            else:
+                if verbose:
+                    print "Debug: Nothing new to fetch in '%s'." % name
+                continue
+        
+        # Feed items to ES
+        nItems = len(items)
+        nNewItems = 0
+        nReplacedItems = 0
+        for item in items:
+            if verbose and dontfeed:
+                print "Fetched item from %s: %s" % (name, item["title"])
+            else:
+                 # Is it new?
+                 itemUpdatedDate = fromISODateString(item.get("updated", None))
+                 itemQualified = False
+                 if not itemUpdatedDate or not lastFetchDate or itemUpdatedDate > lastFetchDate:
+                     itemQualified = True
+                 if not itemQualified and not force:
+                     continue
+
+                 new,replaced = putItem(es, name, item, verbose)
+                 nNewItems += new
+                 nReplacedItems += replaced
+
+        # Update channel info with new lastFetch time (== now)
+        channel.update({"lastFetch": toISODateString(datetime.datetime.utcnow())})
+        if not dontfeed:
+            putChannel(es, channel)
+            if verbose:
+                print "%-10s : %3d new, %3d replaced" % (name, nNewItems, nReplacedItems)
+
+
+def deleteItems(es, before, *feednames):
+
+    andParts = []
+
+    if feednames:
+        andParts.append({"terms": {"feedname": feednames}})
+
+    if before:
+        isoBefore = toISODateString(before)
+        andParts.append({"range": {"updated": { "to": isoBefore }}})
+
+    body = None
+    if andParts:
+        body = createQueryFilter({"and": andParts})
+    else:
+        body = {"query": {"match_all": {}}}
+
+    #print "***DELETING"; print json.dumps(body)
+    es.delete_by_query(index=STORE, doc_type=ITEM, body=body)
+    if not feednames:
+        print "Items deleted."
+    else:
+        print "Items deleted from: %s" % ", ".join(feednames)
+
+
+def deleteFeeds(es, cascading, *feednames):
+
+    channels = getChannels(es, *feednames)
+
+    # Check and report if given feednames are not registered
+    if feednames:
+        for name in feednames:
+            if not name in existingChannels:
+                print "Warning: Channel '%s' not found." % name
+
+    # Delete
+    count = 0
+    for name,channel in channels.items():
+        if cascading:
+            deleteItems(es, None, name)
+        deleteChannel(es, name)
+        count += 1
+    
+    print "%d feed(s) removed." % count
+
+
+#endregion Commands
+
+
+def usage(err = None):
+    if err:
+        print "Argument error: %s" % err
+
+    p = os.path.basename(sys.argv[0])
+    print "Usage:"
+    print "  %s info [-v] [-s <since>] [<feeds>]                    Show feed info" % p
+    print "  %s add <name> <url>                                    Add feed" % p
+    print "  %s remove [-c] [<feeds>]                               Remove feed" % p
+    # Not that important any more... maybe more valuable to remove it to keep the script simpler
+    #print "  %s update [-v] [<feeds>]                               Update feed channel info" % p
+    print "  %s list [-v] [-d] [-l <limit>] [-s <since>] [<feeds>]  List items in index" % p
+    print "  %s clean [-b <before>] [<feeds>]                       Clean items in index" % p
+    print "  %s fetch [-v] [-d] [-f] [<feeds>]                      Fetch items" % p
+
+    print
+    print "  -v = verbose"
+    print "  -d = debug (even more verbose)"
+    print "  -c = cascading, i.e. items will also be removed if you remove a feed with"
+    print "       this option"
+    print "  -f = force, i.e. fetch all available items regardless of last fetch time"
+    print "  -l limit = number of items to show"
+    print "  -s since = for listing items since 'since', with format <n><unit>,"
+    print "       where <n> is a number and unit is one of 's', 'm', 'h', 'd', 'w',"
+    print "       'M', 'y' (second, minute, etc), e.g. '3w'"
+    print "  -s ago = for deleting items older than 'ago', same format as for 'since'"
+
+
+    if err:
+        sys.exit(-1)
+    else:
+        sys.exit(0)
+
+
+def main():
+
+    # Default values
+    verbose = False
+    debug = False
+    cascade = False
+    beforeStr = None
+    sinceStr = None
+    before = None
+    since = None
+    limit = 10
+    force = False
+
+    # Parse command line input
+    if len(sys.argv) == 1: usage()
+    try:
+        optlist, args = getopt.gnu_getopt(sys.argv[1:], ':l:s:b:fhcvd')
+    except:
+        usage()
+    for (o, a) in optlist:
+        if   o == "-h": usage()
+        elif o == "-v": verbose = True
+        elif o == "-c": cascade = True
+        elif o == "-s": sinceStr = a
+        elif o == "-b": beforeStr = a
+        elif o == "-l": limit = int(a)
+        elif o == "-d": debug = True
+        elif o == "-f": force = True
+    if len(args) < 1: usage("missing command")
+    cmd = args[0]
+    args = args[1:]
+
+    # Time validation conversion and checks
+    if beforeStr:
+        try:
+            before = fromAgoString(beforeStr)
+        except:
+            usage("illegal 'ago' time format to 'before' argument, '%s'" % beforeStr)
+    if sinceStr:
+        try:
+            since = fromAgoString(sinceStr)
+        except:
+            usage("illegal 'ago' time format to 'since' argument, '%s'" % sinceStr)
+
+    # Create ElasticSearch proxy
+    es = elasticsearch.Elasticsearch()
+
+    if   cmd == "info":
+        listFeeds(es, verbose, since, *args)
+    elif cmd == "add":
+        if len(args) == 0:
+            print "Reading name and url pairs from lines from stdin..."
+            addBulk(es)
+        else:
+            if len(args) < 2: usage("too few arguments")
+            elif len(args) > 2: usage("too many arguments")
+            name = args[0]
+            url = args[1]
+            addFeed(es, name, url)
+    elif cmd == "remove":
+        deleteFeeds(es, cascade, *args)
+    elif cmd == "update":
+        updateChannelInfo(es, verbose, *args)
+    elif cmd == "list":
+        listItems(es, verbose, debug, since, limit, *args)
+    elif cmd == "clean":
+        deleteItems(es, before, *args)
+    elif cmd == "fetch":
+        fetchItems(es, verbose, debug, force, *args)
+    else:
+        usage("unknown command '%s'" % cmd)
+
+    return
+
+
+if __name__ == "__main__": main()
+
