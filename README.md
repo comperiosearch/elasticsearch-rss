@@ -17,7 +17,7 @@ Pre-requisites:
 
 Python 2.6 with modules feedparser and elasticsearch:
 
-  pip install feedparser elasticsearch
+    pip install feedparser elasticsearch
 
 ### Setup
 
@@ -32,7 +32,7 @@ Suggest doing `rss -h` for the most current version.
 
     rss info [-v] [-s <since>] [<feeds>]                    Show feed/channel info
     rss add <name> <url>                                    Add feed
-    rss remove [-c] [<feeds>]                               Remove feed
+    rss remove [-c]ï¿½[<feeds>]                               Remove feed
     rss list [-v] [-d] [-l <limit>] [-s <since>] [<feeds>]  List items in index
     rss clean [-b <before>] [<feeds>]                       Clean items in index
     rss fetch [-v] [-d] [-f] [<feeds>]                      Fetch items
