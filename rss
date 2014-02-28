@@ -598,12 +598,13 @@ def deleteFeeds(es, cascading, *feednames):
 #endregion Commands
 
 
-def usage(err = None):
+def usage(err = None, rich= False):
     if err:
         print "Argument error: %s" % err
 
     p = os.path.basename(sys.argv[0])
     print "Usage:"
+    print "  %s -h                                                  More help" % p
     print "  %s info [-v] [-s <since>] [<feeds>]                    Show feed info" % p
     print "  %s add <name> <url>                                    Add feed" % p
     print "  %s remove [-c] [<feeds>]                               Remove feed" % p
@@ -613,17 +614,18 @@ def usage(err = None):
     print "  %s clean [-b <before>] [<feeds>]                       Clean items in index" % p
     print "  %s fetch [-v] [-d] [-f] [<feeds>]                      Fetch items" % p
 
-    print
-    print "  -v = verbose"
-    print "  -d = debug (even more verbose)"
-    print "  -c = cascading, i.e. items will also be removed if you remove a feed with"
-    print "       this option"
-    print "  -f = force, i.e. fetch all available items regardless of last fetch time"
-    print "  -l limit = number of items to show"
-    print "  -s since = for listing items since 'since', with format <n><unit>,"
-    print "       where <n> is a number and unit is one of 's', 'm', 'h', 'd', 'w',"
-    print "       'M', 'y' (second, minute, etc), e.g. '3w'"
-    print "  -s ago = for deleting items older than 'ago', same format as for 'since'"
+    if rich:
+        print
+        print "  -v = verbose"
+        print "  -d = debug (even more verbose)"
+        print "  -c = cascading, i.e. items will also be removed if you remove a feed with"
+        print "       this option"
+        print "  -f = force, i.e. fetch all available items regardless of last fetch time"
+        print "  -l limit = number of items to show"
+        print "  -s since = for listing items since 'since', with format <n><unit>,"
+        print "       where <n> is a number and unit is one of 's', 'm', 'h', 'd', 'w',"
+        print "       'M', 'y' (second, minute, etc), e.g. '3w'"
+        print "  -s ago = for deleting items older than 'ago', same format as for 'since'"
 
 
     if err:
@@ -652,7 +654,7 @@ def main():
     except:
         usage()
     for (o, a) in optlist:
-        if   o == "-h": usage()
+        if   o == "-h": usage(rich=True)
         elif o == "-v": verbose = True
         elif o == "-c": cascade = True
         elif o == "-s": sinceStr = a
