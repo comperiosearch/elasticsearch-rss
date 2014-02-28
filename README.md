@@ -17,7 +17,7 @@ Pre-requisites:
 
 Python 2.6 with modules feedparser and elasticsearch:
 
-  pip install feedparser elasticsearch
+    pip install feedparser elasticsearch
 
 ### Setup
 
