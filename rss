@@ -581,7 +581,7 @@ def deleteFeeds(es, cascading, *feednames):
     # Check and report if given feednames are not registered
     if feednames:
         for name in feednames:
-            if not name in existingChannels:
+            if not name in channels:
                 print "Warning: Channel '%s' not found." % name
 
     # Delete
